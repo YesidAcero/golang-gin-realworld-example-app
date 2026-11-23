@@ -10,6 +10,10 @@
 | [REV-GO-001](#rev-go-001--secreto-jwt-hardcodeado-en-el-código-fuente) | Secreto JWT hardcodeado en el código fuente | 🔴 Crítica | `common/utils.go` | S | Sí |
 | [REV-GO-002](#rev-go-002--token-válido-de-un-usuario-inexistente-queda-autenticado) | Token válido de un usuario inexistente queda autenticado | 🔴 Crítica | `users/middlewares.go` | S | Sí |
 | [REV-GO-003](#rev-go-003--pánico-por-nil-en-init-y-testdbinit) | Pánico por nil en `Init()` y `TestDBInit()` | 🔴 Crítica | `common/database.go` | S | Sí |
+| [REV-GO-004](#rev-go-004--aserción-de-tipo-sin-comprobar-en-claims) | Aserción de tipo sin comprobar en claims | 🟠 Alta | `users/middlewares.go` | S | No |
+| [REV-GO-005](#rev-go-005--validación-jwt-sin-lista-blanca-de-algoritmos-ni-expiración-estricta) | Validación JWT sin lista blanca de algoritmos ni expiración estricta | 🟠 Alta | `users/middlewares.go`, `common/test_helpers.go` | S | No |
+| [REV-GO-006](#rev-go-006--aceptación-de-token-jwt-por-query-string) | Aceptación de token JWT por query string | 🟠 Alta | `users/middlewares.go` | S | No |
+
 
 ---
 
@@ -111,3 +115,101 @@ Si la base de datos falla al abrirse o no está disponible, la aplicación puede
 ### ¿Por qué bloquea el merge?
 
 Si la base de datos falla al abrirse, el proceso sigue y provoca un nil pointer dereference (caída abrupta) en lugar de fallar limpiamente; en un repo de ejemplo local puede tolerarse, pero en producción es inaceptable.
+
+---
+
+## REV-GO-004 — Aserción de tipo sin comprobar en claims
+
+| Campo | Contenido |
+|---|---|
+| **ID** | REV-GO-004 |
+| **Severidad** | Alta |
+| **Archivo** | `users/middlewares.go` |
+| **Línea** | 78 y 79 |
+| **Esfuerzo (S/M/L)** | S |
+| **¿Bloquea el merge?** | No |
+
+### Evidencia
+
+Aserción de tipo sin comprobar sobre los claims: `uint(claims["id"].(float64))` hace panic si el claim falta o tiene otro tipo.
+
+### Impacto en producción
+
+Ante un token con datos de usuario ausentes, mal formados o manipulados, la aplicación puede sufrir caídas o errores inesperados para los usuarios (afectando la disponibilidad del servicio) o presentar comportamientos inconsistentes en la validación de acceso (afectando la seguridad).
+
+### Recomendación
+
+1. En `AuthMiddleware` (`users/middlewares.go`, línea 78), reemplaza `my_user_id := uint(claims["id"].(float64))` por una aserción segura: `rawID, ok := claims["id"].(float64)`.
+2. Si `!ok` o `rawID <= 0` (o al convertir a `uint`), si `auto401` es `true`, aborta la petición con `c.AbortWithStatusJSON(http.StatusUnauthorized, common.NewErrorMessage("token", "is invalid"))` y haz `return` sin llamar a `UpdateContextUserModel`.
+3. Si `auto401` es `false`, haz `return` dejando el contexto en anónimo (ya inicializado con `UpdateContextUserModel(c, 0)`).
+4. Si la aserción es válida, convierte `my_user_id := uint(rawID)` y continúa con `UpdateContextUserModel(c, my_user_id)`.
+5. Agrega pruebas unitarias en `users/` cubriendo tokens con claim `id` ausente, `null` o de tipo incorrecto (por ejemplo `string`) tanto con `auto401=true` (esperando `401`) como con `auto401=false`.
+
+### ¿Por qué no bloquea el merge?
+
+Si el PR se está cerrando enfocándose en una remediación específica ya probada y el cambio en `users/middlewares.go` (líneas 78–79) queda planificado o cubierto en el siguiente paso, se deja como `No` para no detener el merge por una aserción de tipo (`S` de esfuerzo), siempre que quede trazabilidad del pendiente.
+
+---
+
+## REV-GO-005 — Validación JWT sin lista blanca de algoritmos ni expiración estricta
+
+| Campo | Contenido |
+|---|---|
+| **ID** | REV-GO-005 |
+| **Severidad** | Alta |
+| **Archivo** | `users/middlewares.go` y `common/test_helpers.go` |
+| **Línea** | 62–68 (`users/middlewares.go`) y 25–35 (`common/test_helpers.go`) |
+| **Esfuerzo (S/M/L)** | S |
+| **¿Bloquea el merge?** | No |
+
+### Evidencia
+
+Parseo JWT sin lista blanca de algoritmos en el middleware (comprobación manual) y sin validación de método en `VerifyTokenClaims`.
+
+### Impacto en producción
+
+La validación de credenciales no es uniforme en todo el sistema ni exige con el mismo rigor su vigencia y firma, lo que puede provocar inconsistencias en el control de acceso y el riesgo de aceptar tokens con condiciones o vencimientos no exigidos estrictamente, afectando la seguridad del servicio.
+
+### Recomendación
+
+1. En `users/middlewares.go` (líneas 62–68), dentro de `AuthMiddleware`, pasa `jwt.WithValidMethods([]string{"HS256"})` y `jwt.WithExpirationRequired()` a `jwt.Parse`, y mantén la validación del método en el callback verificando `token.Method` y devolviendo `[]byte(common.JWTSecret)`.
+2. En `common/test_helpers.go` (líneas 25–35), dentro de `VerifyTokenClaims`, pasa también `jwt.WithValidMethods([]string{"HS256"})` y `jwt.WithExpirationRequired()` a `jwt.ParseWithClaims`, y verifica que el método del token sea HMAC (`*jwt.SigningMethodHMAC`) antes de retornar `[]byte(JWTSecret)`.
+3. Agrega o actualiza pruebas unitarias en `users/` y `common/` que verifiquen el rechazo de tokens sin claim `exp`, tokens expirados, tokens firmados con otro algoritmo distinto de `HS256` y tokens con firma inválida.
+
+### ¿Por qué no bloquea el merge?
+
+El PR ya tiene un foco y un commit listos para avanzar, y estas mejoras (`jwt.WithValidMethods` / `jwt.WithExpirationRequired` en `REV-GO-005`, y retirar `?access_token=` junto con su prueba en `REV-GO-006`) quedan documentadas para resolverse en una iteración o *follow-up* inmediato sin frenar la fusión actual.
+
+---
+
+## REV-GO-006 — Aceptación de token JWT por query string
+
+| Campo | Contenido |
+|---|---|
+| **ID** | REV-GO-006 |
+| **Severidad** | Alta |
+| **Archivo** | `users/middlewares.go` |
+| **Línea** | 13–27 (extracción por query string en líneas 20–24) |
+| **Esfuerzo (S/M/L)** | S |
+| **¿Bloquea el merge?** | No |
+
+### Evidencia
+
+Aceptación de token por query string (`?access_token=...`) en `extractToken`.
+
+### Impacto en producción
+
+Enviar tokens de sesión en la URL expone credenciales sensibles en los registros de actividad del servidor, el historial del navegador y las solicitudes salientes hacia terceros, aumentando el riesgo de filtración y uso indebido de cuentas de usuario.
+
+### Recomendación
+
+1. En `users/middlewares.go` (líneas 13–27, específicamente líneas 20–24), elimina la lectura de `c.Query("access_token")` en `extractToken` para que solo se extraiga el token desde la cabecera `Authorization` (`Token <jwt>`).
+2. Actualiza el comentario de `extractToken` (línea 12) para reflejar que extrae únicamente desde la cabecera `Authorization`.
+3. En `users/unit_test_2.go` (líneas 350–369), ajusta o reemplaza `TestExtractTokenFromQueryParameter` para comprobar que enviar `?access_token=...` ya no autentica al usuario (con `auto401=true` devuelve `401 Unauthorized`; con `auto401=false` queda como anónimo con `user_id: 0`).
+4. Verifica en el código que ningún cliente o flujo interno dependa de `?access_token=` en la URL.
+
+### ¿Por qué no bloquea el merge?
+
+El PR ya tiene un foco y un commit listos para avanzar, y estas mejoras (`jwt.WithValidMethods` / `jwt.WithExpirationRequired` en `REV-GO-005`, y retirar `?access_token=` junto con su prueba en `REV-GO-006`) quedan documentadas para resolverse en una iteración o *follow-up* inmediato sin frenar la fusión actual.
+
+---
