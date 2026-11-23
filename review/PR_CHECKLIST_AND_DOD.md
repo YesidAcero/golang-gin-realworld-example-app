@@ -46,3 +46,5 @@ Un ítem o historia se considera **Terminado (*Done*)** cuando cumple todos los 
 - **Documentación y merge completos:** La documentación aplicable (`/review/README.md`, descripción del PR y notas de seguimiento) está actualizada y el PR está fusionado en la rama objetivo.
 
 ---
+> Nota operativa: este documento aplica como referencia de revisión y criterio de cierre (*Definition of Done*) a partir de este *commit*.
+---
