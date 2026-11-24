@@ -102,10 +102,24 @@ Imaginemos el flujo de checkout o creación de pedidos corriendo sobre una consu
 
 ---
 
-## 6. Estimación (Épica = Bloque 1, equipo de 5 personas)
+## 6. Estimación
 
-* **Descomposición del Bloque 1:**
+Si tomamos el sistema de compra de pólizas como épica con un equipo de 5 personas (por ejemplo: 1 tech lead / dev en Go, 1 dev en .NET, 1 dev frontend en Next.js, 1 QA y 1 apoyo de infra/DevOps), yo lo partiría así:
 
-  *Pendiente de completar finalizado el Bloque 1.*
-  
+- **Arranque, entorno y mocks:** dejar levantado el entorno con un solo comando (base de datos, cola/caché, servicios y simuladores), fijar contratos base y armar los stubs de cotizador, pasarela y emisor con los fallos pedidos (10% webhooks duplicados, 5% payloads inválidos, latencias/timeouts con caso "timeout pero sí emitió" y ventana de caída del emisor).
+- **Orquestador en Go y ACL en .NET:** en Go, `POST /orders` con `Idempotency-Key`, máquina de estados persistida (`CREATED` -> `QUOTED` -> `PAYMENT_PENDING` -> `PAID` -> `ISSUING` -> `ISSUED`, más `FAILED` y `REFUND_REQUIRED`), webhook de pagos con validación HMAC, idempotencia y tolerancia a eventos fuera de orden, outbox, reintentos con backoff + jitter, DLQ, circuit breaker, propagación de `correlation-id` sin datos sensibles en logs y job de reconciliación con consulta obligatoria por referencia externa. En paralelo, en .NET, la capa anticorrupción que traduce el contrato legado, convierte errores de negocio dentro de HTTP 200 en errores explícitos, es idempotente por referencia externa y tiene pruebas unitarias de mapeo y validación.
+- **Consola operativa en Next.js y telemetría:** listado con filtros y búsqueda, detalle con línea de tiempo de eventos, actualización sin recargar (WebSockets), acciones de reintentar emisión y marcar para reverso con confirmación y auditoría de quién ejecutó, todo con TypeScript estricto y tipos derivados del contrato; además, si entra la validación previa de telemetría vehicular, aplicarla con timeouts y resiliencia ante caídas.
+- **Pruebas integradas, caos y cierre:** recorrer el flujo completo bajo los escenarios de fallo del simulador (caída del emisor, timeout que sí emitió, webhooks adelantados o repetidos, envío a DLQ y casos `REFUND_REQUIRED` sin reembolso automático) y verificar coherencia con la escala de referencia (10.000 órdenes/día, picos de 50 RPS y 10.000 vehículos).
+
+### Estimación con rango
+
+- **Realista (8 semanas):** es el rango que más cuadra con el trabajo real: afinar outbox, idempotencia y eventos fuera de orden, dejar bien cubiertas las pruebas unitarias en .NET y ajustar la consola y los flujos de contingencia.
+- **Conservador (10 semanas):** si aparecen sorpresas al modelar las fallas del legado o la reconciliación, si se complica reproducir condiciones de carrera/caos o si hay que rehacer partes de la integración.
+
+### Tres supuestos que más pueden hacer fallar la estimación
+
+1. Que el sistema viejo de pólizas no deje consultar bien por referencia: si hay un timeout y no sabemos con seguridad si la póliza ya se creó o no, revisar órdenes colgadas y evitar emitir dos veces se vuelve mucho más enredado en Go y .NET.
+2. Dejar para el final las pruebas de eventos desordenados y fallos de concurrencia: por ejemplo, que llegue la confirmación del pago antes de guardar PAYMENT_PENDING, o probar caídas del emisor con reintentos y cola de errores (DLQ). Si se deja para lo último, casi siempre toma más tiempo del previsto.
+3. Que el equipo no haya trabajado antes con patrón outbox, manejo de DLQ, pruebas de mapeo/validación en .NET o TypeScript estricto: al principio cuesta más acomodar el diseño y las pruebas, y eso puede atrasar las entregas parciales.
+
 ---
